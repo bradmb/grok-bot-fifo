@@ -1,7 +1,7 @@
 {
-  "name": "fifo-worker",
+  "name": "grok-bot-fifo",
   "version": "0.1.0",
-  "description": "FIFO queue worker: Cloudflare Worker + D1 + CLI (Phase 0 A-C)",
+  "description": "Grok Bot FIFO: Cloudflare Worker + D1 queue authority + fifo CLI, with webhook hooks for Grok Bot agent routines",
   "type": "module",
   "bin": {
     "fifo": "./cli/fifo.mjs"
@@ -20,7 +20,7 @@
     "fifo",
     "d1"
   ],
-  "license": "UNLICENSED",
+  "license": "MIT",
   "devDependencies": {
     "@cloudflare/workers-types": "^5.20260819.1",
     "@types/node": "^24.5.2",
@@ -30,5 +30,9 @@
   },
   "dependencies": {
     "jose": "^5.10.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/bradmb/grok-bot-fifo.git"
   }
 }
