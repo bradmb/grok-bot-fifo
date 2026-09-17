@@ -1,0 +1,51 @@
+# FIFO Worker (Phase 0 A-C)
+# Secrets: wrangler secret put only. Never commit tokens.
+
+name = "fifo-worker"
+main = "src/index.ts"
+compatibility_date = "2026-08-19"
+
+# Replace with your Cloudflare account id (wrangler login exposes it).
+# account_id = "<your-cloudflare-account-id>"
+
+# workers_dev is fine for a first deploy. After Cloudflare Access is live on
+# the API host, set workers_dev = false (Access bypass risk).
+workers_dev = true
+
+# Optional custom hosts: uncomment once DNS + Access are attached and set
+# FIFO_API_HOST / FIFO_SHARE_HOST below.
+# routes = [
+#   { pattern = "fifo-api.<your-domain>", custom_domain = true },
+#   { pattern = "fifo-share.<your-domain>", custom_domain = true },
+# ]
+
+# D1 fifo-worker. Live database_id is minted by `wrangler d1 create fifo-worker`
+# (never invented or committed). Local `wrangler d1 migrations apply --local`
+# does not need a real remote id.
+[[d1_databases]]
+binding = "DB"
+database_name = "fifo-worker"
+# database_id = "<from-wrangler-d1-create>"
+migrations_dir = "migrations"
+
+# Secrets (wrangler secret put <NAME> — never git):
+# - CF_ACCESS_AUD: Zero Trust Access application audience for the API host
+# - WEBHOOK_HMAC_SECRET: HMAC key for webhook envelopes
+# - WEBHOOK_DISPATCH_URL: dispatcher routine webhook URL (empty = stub delivery)
+# - WEBHOOK_DISPATCH_AUTHORIZATION: Authorization header value for the webhook (Bearer …)
+# - FALLBACK_BEARER hashes live in D1 api_clients.secret_hash — never paste here
+
+[vars]
+AUTH_REQUIRED = "true"
+CF_ACCESS_TEAM_DOMAIN = "https://<your-team>.cloudflareaccess.com"
+FIFO_API_HOST = "fifo-api.<your-domain>"
+FIFO_SHARE_HOST = "fifo-share.<your-domain>"
+SHARE_PUBLIC_ORIGIN = "https://fifo-share.<your-domain>"
+STALL_TZ = "America/Denver"
+STALL_START_HOUR = "8"
+STALL_END_HOUR = "17"
+STALL_BUSINESS_MINUTES = "60"
+ENG_CAPACITY = "6"
+
+[triggers]
+crons = ["*/5 * * * *"]
