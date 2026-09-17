@@ -1,36 +1,33 @@
 # grok-bot-fifo
 
-A shared **FIFO work queue for Grok Bot agent fleets**.
+This repo is the **queue**. Agents do not chat with it. They enqueue work, claim a seat, stall-chase, and mark items done. The Worker stores that state in Cloudflare D1 and, when something important happens, POSTs a signed CloudEvent to a **Grok Bot webhook routine**.
 
-This repo is a Cloudflare Worker plus D1 database (the queue authority) and a
-headless `fifo` CLI. Agents enqueue work, claim seats, stall-chase, and mark
-items done. The Worker never chats: it POSTs signed CloudEvents to a **Grok Bot
-webhook routine** when work is enqueued, assigned, stalled, or completed.
+The bot that receives those POSTs is **not** in this repo. It is the **FIFO Ops** Grok Bot template. A new owner installs this Worker first, then imports that template and wires three secrets. After that, the template’s `fifo-ops-getting-started` skill can finish the rest (API URL, vault credentials, assigner, exec surface, seats).
 
 - **Repo:** https://github.com/bradmb/grok-bot-fifo
 - **License:** MIT
-- **Secrets:** never commit tokens, Access credentials, or webhook `Authorization` values
+- **Secrets:** never commit tokens, Access credentials, webhook URLs, or `Authorization` values
 
-## What you get
+## What the queue does
 
-- **Personal queues** (`personal:<agent>`) — one in-progress seat per owner (WIP = 1). Overflow stays queued and the response includes a share link.
-- **Eng team FIFO** (`team:eng`) — N named IC seats (`queue_slots`). `claim-next` fills Factory seats; `claim-cr` fills a parallel Code Review lane that does not consume Factory capacity.
+- **Personal queues** (`personal:<agent>`) — one in-progress seat per owner. Extra work stays queued and the response can include a share link.
+- **Eng team FIFO** (`team:eng`) — N named IC seats. `claim-next` fills Factory seats. `claim-cr` fills a parallel Code Review lane that does not consume Factory capacity.
 - **Parked hold lane** (`team:parked`) — capacity 0, not claimable. Items move between eng and parked.
-- **Hard-block** — holds a seat; `clear-block` unblocks without releasing it.
-- **Stall clock** — Factory in-progress items stall after a configurable run of business minutes (default America/Denver, 08:00–17:00, 60 minutes).
-- **Share boards** — `GET /s/<token>` renders Queued | In Progress | Code Review. No secrets, live refresh. The token is the bearer.
+- **Hard-block** holds a seat. `clear-block` unblocks without releasing it.
+- **Stall clock** — Factory in-progress items stall after a run of business minutes (default America/Denver, 08:00–17:00, 60 minutes).
+- **Share boards** — `GET /s/<token>` renders Queued | In Progress | Code Review. The token is the bearer. No other secrets on that page.
 - **Webhook outbox** — CloudEvents 1.0, HMAC-signed, delivered immediately with cron retry.
 
-## Prerequisites
+## What you need
 
 - Node.js 22+ and npm
 - A Cloudflare account with Workers and D1
-- A Grok Bot agent that will own queue operations (the **dispatcher**)
-- Recommended in production: Cloudflare Zero Trust Access with a service token on the API host
+- The **FIFO Ops** Grok Bot template (imported after the Worker is live)
+- For production: Cloudflare Zero Trust Access with a service token on the API host
 
-## Install and deploy
+You will work in this order: clone and test → log in → create D1 → migrate → deploy → fill `[vars]` → put secrets → seed a hashed bearer → smoke test → **hook FIFO Ops**.
 
-### 1. Clone and install
+## 1. Clone, install, and test
 
 ```bash
 git clone https://github.com/bradmb/grok-bot-fifo.git
@@ -40,22 +37,24 @@ npm test
 npm run typecheck
 ```
 
-### 2. Log in to Cloudflare
+If tests fail, stop. Do not deploy a Worker you have not proven locally.
+
+## 2. Log in to Cloudflare
 
 ```bash
 npx wrangler login
 npx wrangler whoami
 ```
 
-`whoami` prints the Cloudflare `account_id` you will put in `wrangler.toml`.
+`whoami` prints the Cloudflare `account_id`. You will paste that into `wrangler.toml`. Do not invent one.
 
-### 3. Create D1 and wire `wrangler.toml`
+## 3. Create D1 and paste IDs into `wrangler.toml`
 
 ```bash
 npx wrangler d1 create fifo-worker
 ```
 
-Copy the returned `database_id` into `wrangler.toml`. Do not invent an id.
+Wrangler prints a `database_id`. Copy **that** value into `wrangler.toml`. Do not invent an id and do not commit someone else’s.
 
 ```toml
 [[d1_databases]]
@@ -65,55 +64,75 @@ database_id = "<from-wrangler-d1-create>"
 migrations_dir = "migrations"
 ```
 
-Set `account_id` from `wrangler whoami` (uncomment the line in `wrangler.toml`).
+Uncomment `account_id` at the top of `wrangler.toml` and paste the id from `wrangler whoami`.
 
-Under `[vars]`, replace the placeholder hostnames (`CF_ACCESS_TEAM_DOMAIN`,
-`FIFO_API_HOST`, `FIFO_SHARE_HOST`, `SHARE_PUBLIC_ORIGIN`) with your domain.
-For a first deploy you can leave the placeholders and keep `workers_dev = true`
-so the Worker is reachable on `*.workers.dev`. On that host the Worker serves
-both `/v1/*` and `/s/*`, and share links use the request origin.
+Leave `workers_dev = true` for the first deploy. Custom hostnames come in step 6.
 
-### 4. Apply migrations
+## 4. Apply migrations
 
-Local D1 (for `wrangler dev`):
+Local D1 (needed for `wrangler dev`):
 
 ```bash
 npx wrangler d1 migrations apply fifo-worker --local
 ```
 
-Production D1:
+Production D1 (needed before the first remote deploy can serve queues):
 
 ```bash
 npx wrangler d1 migrations apply fifo-worker --remote
 ```
 
-### 5. Deploy the Worker
+Migrations seed agents, `team:eng` seats (`ic1`–`ic6`), and the parked lane. They do **not** seed API clients or secrets.
+
+## 5. Deploy the Worker
 
 ```bash
 npx wrangler deploy
 ```
 
-Note the Worker URL (for example `https://fifo-worker.<account>.workers.dev`).
-That base URL is `FIFO_API` for the CLI and for agents.
+Note the Worker URL, for example `https://fifo-worker.<account>.workers.dev`. That origin is `FIFO_API` for the CLI and for agents until you attach custom hosts.
 
-### 6. Custom hosts and Cloudflare Access
+On `*.workers.dev` the Worker serves both `/v1/*` (API) and `/s/*` (share boards). Share links use the request origin.
 
-For a production split between an authenticated API and a public share board:
+## 6. Hosts and `[vars]`
+
+These names match live `wrangler.toml`. Edit the committed `[vars]` block; do not add extra keys.
+
+| Var | Default in `wrangler.toml` | What to put |
+|---|---|---|
+| `FIFO_API_HOST` | `fifo-api.<your-domain>` | Hostname that serves `/v1/*` only |
+| `FIFO_SHARE_HOST` | `fifo-share.<your-domain>` | Hostname that serves `/s/*` only |
+| `SHARE_PUBLIC_ORIGIN` | `https://fifo-share.<your-domain>` | Public origin used when minting share links |
+| `CF_ACCESS_TEAM_DOMAIN` | `https://<your-team>.cloudflareaccess.com` | Access team domain (JWT issuer / JWKS) |
+| `AUTH_REQUIRED` | `"true"` | Keep `true` in production. Set `false` only in gitignored `.dev.vars` for localhost |
+| `ENG_CAPACITY` | `"6"` | Factory in-progress seats on `team:eng` (migrations seed six ICs) |
+| `STALL_TZ` | `America/Denver` | Stall-clock timezone |
+| `STALL_START_HOUR` | `"8"` | Stall window start (wall-clock hour) |
+| `STALL_END_HOUR` | `"17"` | Stall window end (wall-clock hour, exclusive) |
+| `STALL_BUSINESS_MINUTES` | `"60"` | Business minutes of silence before `item.stalled` |
+
+For a first deploy you can leave the hostname placeholders and keep `workers_dev = true`. The Worker still works on `*.workers.dev`.
+
+When you are ready to split an authenticated API from a public share board:
 
 1. Create DNS for `fifo-api.<your-domain>` and `fifo-share.<your-domain>`.
-2. Set `[vars]` to match:
-   - `FIFO_API_HOST` — hostname that serves `/v1/*` only
-   - `FIFO_SHARE_HOST` — hostname that serves `/s/*` only
-   - `SHARE_PUBLIC_ORIGIN` — public origin used when minting share links (`https://fifo-share.<your-domain>`)
-   - `CF_ACCESS_TEAM_DOMAIN` — `https://<your-team>.cloudflareaccess.com`
-3. Uncomment `routes` in `wrangler.toml`. Once Access is live on the API host, set `workers_dev = false` so the API is not also exposed on `*.workers.dev`.
+2. Set `FIFO_API_HOST`, `FIFO_SHARE_HOST`, `SHARE_PUBLIC_ORIGIN`, and `CF_ACCESS_TEAM_DOMAIN` to your real values.
+3. Uncomment `routes` in `wrangler.toml`. After Access is live on the API host, set `workers_dev = false` so the API is not also exposed on `*.workers.dev`.
 4. Create a Cloudflare Zero Trust **Access** application on the API host with a **service-token** policy for machines and agents.
 5. Leave the share host **without** Access. `/s/<token>` is its own bearer.
-6. Put the Access application audience in the `CF_ACCESS_AUD` secret.
+6. Put the Access application audience in the `CF_ACCESS_AUD` secret (next step).
 
 The Worker enforces the split: share routes 404 on the API host, and API routes 404 on the share host.
 
-### 7. Secrets (never commit)
+Redeploy after you change `[vars]`:
+
+```bash
+npx wrangler deploy
+```
+
+## 7. Secrets (`wrangler secret put`)
+
+Never commit these. Wrangler prompts for the value; it does not echo it into git.
 
 ```bash
 npx wrangler secret put WEBHOOK_HMAC_SECRET
@@ -124,14 +143,14 @@ npx wrangler secret put CF_ACCESS_AUD
 
 | Secret | Purpose |
 |---|---|
-| `WEBHOOK_HMAC_SECRET` | HMAC-SHA256 key for signed CloudEvent bodies (`Fifo-Signature`) |
-| `WEBHOOK_DISPATCH_URL` | Grok Bot routine webhook URL. Empty or unset = stub delivery (rows stay in D1 as `stubbed`; nothing is POSTed) |
-| `WEBHOOK_DISPATCH_AUTHORIZATION` | Full `Authorization` header value sent to that URL (usually `Bearer …`, exactly as Grok Bot shows it) |
-| `CF_ACCESS_AUD` | Access application audience for JWT verification on the API host |
+| `WEBHOOK_HMAC_SECRET` | Shared HMAC-SHA256 key. The Worker signs every POST with `Fifo-Signature`. The FIFO Ops routine may verify the same secret. |
+| `WEBHOOK_DISPATCH_URL` | Webhook URL from the FIFO Ops routine. Empty or unset = stub delivery (rows stay in D1 as `stubbed`; nothing is POSTed). That is fine until you finish the next section. |
+| `WEBHOOK_DISPATCH_AUTHORIZATION` | Full `Authorization` header value from that same routine (usually `Bearer …`, copied exactly). |
+| `CF_ACCESS_AUD` | Access application audience for JWT verification on the API host. Skip until Access is attached. |
 
-Fallback bearer hashes live in D1 (`api_clients.secret_hash`), not in Wrangler secrets. See the next step.
+Client bearer hashes live in D1 (`api_clients.secret_hash`), not in Wrangler secrets. Seed those next.
 
-### 8. Seed `api_clients`
+## 8. Seed `api_clients` (hashed bearer)
 
 Callers authenticate with one of:
 
@@ -139,7 +158,7 @@ Callers authenticate with one of:
 - Access service token headers (`CF-Access-Client-Id` / `CF-Access-Client-Secret`)
 - `Authorization: Bearer <token>` whose SHA-256 matches `secret_hash`
 
-Only the **hash** is stored. Hash the client secret (or bearer token) locally — never paste the raw value into git or chat:
+Only the **hash** is stored. Hash the client secret (or bearer token) on your machine — never paste the raw value into git or chat:
 
 ```bash
 printf '%s' "$CLIENT_SECRET" | openssl dgst -sha256 | awk '{print $NF}'
@@ -175,9 +194,9 @@ Permissions:
 | `team:eng:progress` | Progress / done / block on items |
 | `personal:own` | Label for personal-queue clients. A client bound to an agent can already enqueue, mutate, and mint shares on its own `personal:<agent>` queue |
 
-Seed ICs and seats with migrations; set `ENG_CAPACITY` in `wrangler.toml` to match (default `6`).
+Keep `ENG_CAPACITY` in `wrangler.toml` in sync with seeded Factory seats (default `6`).
 
-### 9. Smoke test
+## 9. Smoke test
 
 ```bash
 export FIFO_API=https://fifo-worker.<account>.workers.dev   # or https://fifo-api.<your-domain>
@@ -185,7 +204,7 @@ curl -s "$FIFO_API/health"
 # {"ok":true,"service":"fifo-worker"}
 ```
 
-`GET /health` is public. Queue APIs need credentials (values from your vault — do not paste secrets into chat):
+`GET /health` is public. Queue APIs need credentials from your vault — do not paste secrets into chat:
 
 ```bash
 curl -s "$FIFO_API/v1/queues/team:eng" \
@@ -194,53 +213,76 @@ curl -s "$FIFO_API/v1/queues/team:eng" \
   -H "X-Fifo-Actor: dispatcher"
 ```
 
-## Hook Grok Bot agent routines
+Or with the CLI (same env names the FIFO Ops skill will ask you to vault):
 
-The Worker POSTs signed CloudEvents to a URL you own. Point that URL at a
-**webhook routine** on the Grok Bot agent that runs FIFO ops (the dispatcher).
+```bash
+export FIFO_API=https://fifo-worker.<account>.workers.dev
+export FIFO_ACCESS_CLIENT_ID=…
+export FIFO_ACCESS_CLIENT_SECRET=…
+export FIFO_ACTOR=dispatcher
 
-### Map the routine to Worker secrets
+npm link   # or: node ./cli/fifo.mjs …
+fifo queue show --team eng
+```
 
-1. Open the dispatcher agent in Grok Bot and add a **webhook** routine.
-2. Copy from the routine sidebar:
-   - **Webhook URL** → `WEBHOOK_DISPATCH_URL`
-   - **Webhook key / Authorization header** → `WEBHOOK_DISPATCH_AUTHORIZATION` (the exact header value, usually `Bearer <key>`)
-3. Put the same HMAC key on both sides as `WEBHOOK_HMAC_SECRET`.
+If `/health` is not `ok`, the Worker did not deploy. If the queue call is `401`, the `api_clients` hash or Access headers are wrong. If the queue call is `200` and `WEBHOOK_DISPATCH_URL` is still empty, that is expected: outbox rows are `stubbed` until you hook FIFO Ops.
+
+## Hook into the FIFO Ops Grok Bot template
+
+This is the handoff the `fifo-ops-getting-started` skill expects. The Worker is the queue authority. FIFO Ops is the bot that wakes when the queue changes. Do not skip this section and do not invent a second queue.
+
+### 1. Import or open FIFO Ops
+
+In Grok Bot, import (or open) the **FIFO Ops** template. The getting-started skill on that bot tells you to deploy `grok-bot-fifo` first (this README) and then wire the webhook. You are on that step now.
+
+### 2. Create a webhook routine
+
+On that bot, create a **webhook routine**. A clear name is **FIFO Worker lane webhooks**. This is the URL the Worker will POST to.
+
+### 3. Copy routine values into Worker secrets
+
+From the routine sidebar, copy two fields. Put them on the Worker with `wrangler secret put` (paste when prompted; do not commit):
+
+| From the FIFO Ops routine | Worker secret |
+|---|---|
+| **Webhook URL** | `WEBHOOK_DISPATCH_URL` |
+| **Authorization** header value (usually `Bearer …`, copied exactly) | `WEBHOOK_DISPATCH_AUTHORIZATION` |
 
 ```bash
 npx wrangler secret put WEBHOOK_DISPATCH_URL
-# paste the Grok Bot routine webhook URL
+# paste the routine Webhook URL
 
 npx wrangler secret put WEBHOOK_DISPATCH_AUTHORIZATION
-# paste: Bearer …   (exact value from Grok Bot)
+# paste the Authorization value exactly as Grok Bot shows it
+```
 
+### 4. Share one HMAC secret
+
+Generate a long random string. Put the **same** value in both places:
+
+- Worker secret `WEBHOOK_HMAC_SECRET`
+- The FIFO Ops routine, if it asks for an HMAC / signing secret (it may verify `Fifo-Signature`)
+
+```bash
 npx wrangler secret put WEBHOOK_HMAC_SECRET
-# paste a long random string; store the same value on the routine for verification
+# paste the shared random string; store the same value on the routine
 ```
 
-### CloudEvents envelope
+Until `WEBHOOK_DISPATCH_URL` is set, the Worker stubs dispatcher events in D1 and does not POST.
 
-Each POST is `Content-Type: application/json` (not `application/cloudevents+json`) with a CloudEvents 1.0 body:
+### 5. Continue the FIFO Ops getting-started walkthrough
 
-```json
-{
-  "specversion": "1.0",
-  "id": "5d1c0b7e-8f3a-4e0d-9a51-1f9d2c4a6b21",
-  "source": "fifo-worker",
-  "type": "item.enqueued",
-  "time": "2026-09-17T14:05:00.000Z",
-  "datacontenttype": "application/json",
-  "data": {
-    "queue_key": "team:eng",
-    "item_id": "…",
-    "title": "Fix login redirect"
-  }
-}
-```
+Webhook wiring is the Worker’s last required step. Go back to the FIFO Ops skill and finish its remaining checklist:
 
-Dedupe on `id`. Retries reuse the same `id` and re-sign with a new timestamp.
+- `FIFO_API` — the Worker base URL from step 5 (`https://fifo-worker.<account>.workers.dev` or `https://fifo-api.<your-domain>`)
+- Vault Access / bearer — the same `FIFO_ACCESS_CLIENT_ID` / `FIFO_ACCESS_CLIENT_SECRET` (or `FIFO_BEARER`) you used in the smoke test
+- Assigner, exec surface, and seats — configured on the bot, not in this repo
 
-### HMAC verification
+The skill will keep using this Worker as `FIFO_API`. There is no parallel queue file to create.
+
+### What the Worker POSTs (CloudEvents + HMAC)
+
+Each delivery is `POST` with `Content-Type: application/json` (not `application/cloudevents+json`) and a CloudEvents 1.0 body. Typical fields: `specversion`, `id`, `source` (`fifo-worker`), `type` (for example `item.enqueued`), `time`, `datacontenttype`, and `data` (queue key, item id, title).
 
 Headers on every signed POST:
 
@@ -251,60 +293,20 @@ Headers on every signed POST:
 | `Fifo-Signature` | `sha256=<hex>` HMAC-SHA256 of `{timestamp}.{eventId}.{rawBody}` using `WEBHOOK_HMAC_SECRET` |
 | `Authorization` | `WEBHOOK_DISPATCH_AUTHORIZATION`, if set |
 
-Reject a mismatched signature before the routine mutates any queue state.
+Dedupe on CloudEvent `id`. Retries reuse the same `id` and re-sign with a new timestamp. Reject a mismatched `Fifo-Signature` before the routine mutates queue state.
 
-```js
-import { createHmac, timingSafeEqual } from "node:crypto";
+Only the `dispatcher` destination is POSTed to `WEBHOOK_DISPATCH_URL`. Other destinations are recorded in the outbox as `stubbed`.
 
-function verifyFifoSignature(headers, rawBody, secret) {
-  const eventId = headers["fifo-event-id"] ?? "";
-  const timestamp = headers["fifo-timestamp"] ?? "";
-  const given = (headers["fifo-signature"] ?? "").replace(/^sha256=/, "");
-  const expected = createHmac("sha256", secret)
-    .update(`${timestamp}.${eventId}.${rawBody}`)
-    .digest("hex");
-  if (given.length !== expected.length) return false;
-  return timingSafeEqual(Buffer.from(given, "hex"), Buffer.from(expected, "hex"));
-}
-```
-
-### Events that wake the routine
-
-Only the `dispatcher` destination is POSTed to `WEBHOOK_DISPATCH_URL`. Other destinations (personal-queue owners, `requester_ref`) are recorded in the outbox as `stubbed` for audit.
-
-| `type` | When it fires | What the routine typically does |
+| `type` | When it fires | What FIFO Ops typically does |
 |---|---|---|
-| `item.enqueued` | New claimable work on `team:eng` | If a Factory seat is free, claim the head (`fifo next --team eng --assignee <ic>`, or `fifo claim-cr` for Code Review) |
-| `item.assigned` | An item was claimed onto a seat | Wake the assignee (or a dedicated assigner) if that is how your fleet works |
+| `item.enqueued` | New claimable work on `team:eng` | If a Factory seat is free, claim the head |
+| `item.assigned` | An item was claimed onto a seat | Wake the assignee (or assigner) |
 | `item.stalled` | Factory in-progress went quiet past the stall clock | Chase the assignee |
 | `item.done` | An item completed and `requester_ref` is set | Notify that requester when it is an agent id |
 | `item.hard_blocked` / `item.hard_block_cleared` | Hard-block toggled on `team:eng` | Ops awareness; the seat stays held |
 | `eng.hours.open` | Weekday open tick (06:00 America/Denver) | Drain queued heads while seats are free |
 
-The Worker does **not** POST for parked-queue events, HOLD / STOP / parked titles, after-hours claimable noise, or move / reorder / progress / capacity chatter. Those still land in `item_events`. Empty `WEBHOOK_DISPATCH_URL` stubs every row.
-
-Keep a dedupe store of CloudEvent `id`s so outbox retries do not double-claim.
-
-### CLI from the Grok Bot host
-
-On the dispatcher box (vaulted env, never print secrets):
-
-```bash
-export FIFO_API=https://fifo-api.<your-domain>
-export FIFO_ACCESS_CLIENT_ID=…
-export FIFO_ACCESS_CLIENT_SECRET=…
-export FIFO_ACTOR=dispatcher
-export FIFO_SPOOL=/tmp/fifo-spool   # optional; default ~/.fifo-spool
-
-npm link   # or: node ./cli/fifo.mjs …
-fifo enqueue --team eng --title "…" --json
-fifo next --team eng --assignee <ic>
-fifo progress --id <id> --note "…"
-fifo done --id <id>
-fifo queue show --team eng
-```
-
-Mutations are written to the spool directory first and deleted only after HTTP 2xx. Replays reuse the original `Idempotency-Key`.
+The Worker does **not** POST for parked-queue events, HOLD / STOP / parked titles, after-hours claimable noise, or move / reorder / progress / capacity chatter. Those still land in `item_events`.
 
 ## Local development
 
@@ -371,7 +373,7 @@ fifo share mint --queue team:eng|team:parked|personal:<agent>
 fifo help
 ```
 
-`--json` prints the raw response. Mutations need `Idempotency-Key` (the CLI generates one). The CLI never prints secrets.
+`--json` prints the raw response. Mutations need `Idempotency-Key` (the CLI generates one). The CLI never prints secrets. Mutations are written to the spool directory first and deleted only after HTTP 2xx. Replays reuse the original `Idempotency-Key`.
 
 ## HTTP API
 
@@ -429,7 +431,7 @@ These names match live `wrangler.toml`. Do not add extras.
 | Secret | Purpose |
 |---|---|
 | `WEBHOOK_HMAC_SECRET` | HMAC key for `Fifo-Signature` |
-| `WEBHOOK_DISPATCH_URL` | Dispatcher Grok Bot routine webhook URL (empty = stub) |
+| `WEBHOOK_DISPATCH_URL` | FIFO Ops routine Webhook URL (empty = stub) |
 | `WEBHOOK_DISPATCH_AUTHORIZATION` | `Authorization` header sent with each webhook |
 | `CF_ACCESS_AUD` | Access application audience |
 
