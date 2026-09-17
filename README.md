@@ -448,4 +448,4 @@ Client secrets are not Wrangler config. Store only SHA-256 hex in `api_clients.s
 
 ## License
 
-MIT © 2026 Brad Butner. See [LICENSE](./LICENSE).
+This project is MIT-licensed. See [LICENSE](./LICENSE).
